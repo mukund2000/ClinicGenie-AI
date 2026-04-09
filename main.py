@@ -1,6 +1,6 @@
 
 from typing import Literal
-from Models.models import DateModel, DateTimeModel, IdentificationNumberModel
+from data_models.models import *
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 import pandas as pd
@@ -108,12 +108,12 @@ llm_with_tools = llm.bind_tools([check_availability_by_doctor, check_availabilit
 
 response = llm_with_tools.invoke([
     SystemMessage(content="You are a medical assistant. If user asks about doctor availability, you MUST call the tool."),
-    HumanMessage(content="cancel my appointment with a dr. john doe on 5-8-2024 08:00? My id number is 1234567`")
+    HumanMessage(content="book my appointment with a dr. john doe on 5-8-2024 08:00? My id number is 1234567`")
 ])
 print(response)
 
 
 if response.tool_calls:
     tool_call = response.tool_calls[0]
-    tool_result = cancel_appointment.invoke(tool_call["args"])
+    tool_result = set_appointment.invoke(tool_call["args"])
     print("Tool Output:", tool_result)
