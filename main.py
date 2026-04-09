@@ -22,6 +22,23 @@ class DateModel(BaseModel):
             raise ValueError("The date must be in the format 'DD-MM-YYYY'")
         return v
     
+class DateTimeModel(BaseModel):
+    date:str=Field(description="Properly formatted date", pattern=r'^\d{2}-\d{2}-\d{4} \d{2}:\d{2}$')
+    
+    @field_validator("date")
+    def check_format_date(cls, v):
+        if not re.match(r'^\d{2}-\d{2}-\d{4} \d{2}:\d{2}$', v):  # Ensures 'DD-MM-YYYY HH:MM' format
+            raise ValueError("The date should be in format 'DD-MM-YYYY HH:MM'")
+        return v
+    
+class IdentificationNumberModel(BaseModel):
+    id: int = Field(description="Identification number (7 or 8 digits long)")
+    @field_validator("id")
+    def check_format_id(cls, v):
+        if not re.match(r'^\d{7,8}$', str(v)):  # Convert to string before matching
+            raise ValueError("The ID number should be a 7 or 8-digit number")
+        return v
+    
 
 @tool
 def check_availability_by_doctor(desired_date:DateModel, doctor_name:Literal['kevin anderson','robert martinez','susan davis','daniel miller','sarah wilson','michael green','lisa brown','jane smith','emily johnson','john doe']):
@@ -30,7 +47,7 @@ def check_availability_by_doctor(desired_date:DateModel, doctor_name:Literal['ke
     The parameters should be mentioned by the user in the query
     """
     print(f"Checking availability for doctor {doctor_name} on {desired_date.date}")
-    df = pd.read_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\project\data\doctor_availability.csv")
+    df = pd.read_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\ClinicGenie-AI\data\doctor_availability.csv")
     
     print(df.head())
     
@@ -52,7 +69,7 @@ def check_availability_by_specialization(desired_date:DateModel, specialization:
     Checking the database if we have availability for the specific specialization.
     The parameters should be mentioned by the user in the query
     """
-    df = pd.read_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\project\data\doctor_availability.csv")
+    df = pd.read_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\ClinicGenie-AI\data\doctor_availability.csv")
     df['date_slot_time'] = df['date_slot'].apply(lambda input: input.split(' ')[-1])
     rows = df[(df['date_slot'].apply(lambda input: input.split(' ')[0]) == desired_date.date) & (df['specialization'] == specialization) & (df['is_available'] == True)].groupby(['specialization', 'doctor_name'])['date_slot_time'].apply(list).reset_index(name='available_slots')
     print("rows:",rows)
@@ -78,16 +95,36 @@ def check_availability_by_specialization(desired_date:DateModel, specialization:
 
     return output
 
-llm_with_tools = llm.bind_tools([check_availability_by_doctor, check_availability_by_specialization])
+@tool
+def set_appointment(desired_date:DateTimeModel, id_number:IdentificationNumberModel, doctor_name:Literal['kevin anderson','robert martinez','susan davis','daniel miller','sarah wilson','michael green','lisa brown','jane smith','emily johnson','john doe']):
+    """
+    Set appointment or slot with the doctor.
+    The parameters MUST be mentioned by the user in the query.
+    """
+    df = pd.read_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\ClinicGenie-AI\data\doctor_availability.csv")
+
+    print(f"Setting appointment for doctor {doctor_name} on {desired_date.date} for patient with ID {id_number.id}")
+    case = df[(df['date_slot'] == desired_date.date)&(df['doctor_name'] == doctor_name)&(df['is_available'] == True)]
+    if len(case) == 0:
+        return "No available appointments for that particular case"
+    else:
+        df.loc[(df['date_slot'] == (desired_date.date))&(df['doctor_name'] == doctor_name) & (df['is_available'] == True), ['is_available','patient_to_attend']] = [False, id_number.id]
+        df.to_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\ClinicGenie-AI\data\availability.csv", index = False)
+
+        return "Successfully done"
+
+
+
+llm_with_tools = llm.bind_tools([check_availability_by_doctor, check_availability_by_specialization, set_appointment])
 
 response = llm_with_tools.invoke([
     SystemMessage(content="You are a medical assistant. If user asks about doctor availability, you MUST call the tool."),
-    HumanMessage(content="What are the available slots for general dentist on 7-8-2024?")
+    HumanMessage(content="book my appointment with a dr. john doe on 5-8-2024 08:00? My id number is 1234567`")
 ])
 print(response)
 
 
 if response.tool_calls:
     tool_call = response.tool_calls[0]
-    tool_result = check_availability_by_specialization.invoke(tool_call["args"])
+    tool_result = set_appointment.invoke(tool_call["args"])
     print("Tool Output:", tool_result)
