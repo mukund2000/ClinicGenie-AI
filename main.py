@@ -1,12 +1,10 @@
 
-import re
 from typing import Literal
-
+from Models.models import DateModel, DateTimeModel, IdentificationNumberModel
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 import pandas as pd
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field, field_validator
 from langchain_core.messages import HumanMessage, SystemMessage
 
 load_dotenv()
@@ -14,30 +12,6 @@ load_dotenv()
 # Base LLM instance (no tools attached yet)
 llm=ChatGroq(model_name="openai/gpt-oss-20b")
 
-class DateModel(BaseModel):
-    date: str = Field(description="Properly formatted date", pattern=r'^\d{2}-\d{2}-\d{4}$')
-    @field_validator("date")
-    def check_format_date(cls, v):
-        if not re.match(r'^\d{2}-\d{2}-\d{4}$', v):  # Ensures DD-MM-YYYY format
-            raise ValueError("The date must be in the format 'DD-MM-YYYY'")
-        return v
-    
-class DateTimeModel(BaseModel):
-    date:str=Field(description="Properly formatted date", pattern=r'^\d{2}-\d{2}-\d{4} \d{2}:\d{2}$')
-    
-    @field_validator("date")
-    def check_format_date(cls, v):
-        if not re.match(r'^\d{2}-\d{2}-\d{4} \d{2}:\d{2}$', v):  # Ensures 'DD-MM-YYYY HH:MM' format
-            raise ValueError("The date should be in format 'DD-MM-YYYY HH:MM'")
-        return v
-    
-class IdentificationNumberModel(BaseModel):
-    id: int = Field(description="Identification number (7 or 8 digits long)")
-    @field_validator("id")
-    def check_format_id(cls, v):
-        if not re.match(r'^\d{7,8}$', str(v)):  # Convert to string before matching
-            raise ValueError("The ID number should be a 7 or 8-digit number")
-        return v
     
 
 @tool
@@ -113,18 +87,33 @@ def set_appointment(desired_date:DateTimeModel, id_number:IdentificationNumberMo
 
         return "Successfully done"
 
+@tool
+def cancel_appointment(date:DateTimeModel, id_number:IdentificationNumberModel, doctor_name:Literal['kevin anderson','robert martinez','susan davis','daniel miller','sarah wilson','michael green','lisa brown','jane smith','emily johnson','john doe']):
+    """
+    Canceling an appointment.
+    The parameters MUST be mentioned by the user in the query.
+    """
+    df = pd.read_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\ClinicGenie-AI\data\availability.csv")
+    print(f"Cancelling appointment for doctor {doctor_name} on {date.date} for patient with ID {id_number.id}")
+    case_to_remove = df[(df['date_slot'] == date.date)&(df['patient_to_attend'] == id_number.id)&(df['doctor_name'] == doctor_name)]
+    if len(case_to_remove) == 0:
+        return "You don´t have any appointment with that specifications"
+    else:
+        df.loc[(df['date_slot'] == date.date) & (df['patient_to_attend'] == id_number.id) & (df['doctor_name'] == doctor_name), ['is_available', 'patient_to_attend']] = [True, None]
+        df.to_csv(r"C:\Users\mukun\OneDrive\Documents\Projects\doctor-appointment\ClinicGenie-AI\data\availability.csv", index = False)
 
+        return "Successfully cancelled"
 
-llm_with_tools = llm.bind_tools([check_availability_by_doctor, check_availability_by_specialization, set_appointment])
+llm_with_tools = llm.bind_tools([check_availability_by_doctor, check_availability_by_specialization, set_appointment, cancel_appointment])
 
 response = llm_with_tools.invoke([
     SystemMessage(content="You are a medical assistant. If user asks about doctor availability, you MUST call the tool."),
-    HumanMessage(content="book my appointment with a dr. john doe on 5-8-2024 08:00? My id number is 1234567`")
+    HumanMessage(content="cancel my appointment with a dr. john doe on 5-8-2024 08:00? My id number is 1234567`")
 ])
 print(response)
 
 
 if response.tool_calls:
     tool_call = response.tool_calls[0]
-    tool_result = set_appointment.invoke(tool_call["args"])
+    tool_result = cancel_appointment.invoke(tool_call["args"])
     print("Tool Output:", tool_result)
