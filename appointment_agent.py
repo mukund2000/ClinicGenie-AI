@@ -1,14 +1,20 @@
 from typing import Annotated, Any, Optional
 
 from dotenv import load_dotenv
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
-from toolkit.tools import cancel_appointment, reschedule_appointment, set_appointment
+from toolkit.tools import (
+    cancel_appointment,
+    check_availability_by_doctor,
+    check_availability_by_specialization,
+    reschedule_appointment,
+    set_appointment,
+)
 
 
 load_dotenv()
@@ -21,8 +27,8 @@ class AppointmentAgentState(TypedDict):
 BOOKING_AGENT_PROMPT = """
 You are ClinicGenie, a doctor appointment assistant.
 
-You can help patients book, cancel, and reschedule doctor appointments by using
-the available tools.
+You can help patients check doctor availability, book appointments, cancel
+appointments, and reschedule appointments by using the available tools.
 
 Available doctors:
 - kevin anderson
@@ -37,11 +43,14 @@ Available doctors:
 - john doe
 
 Required information:
+- To check availability by doctor: doctor name and date.
+- To check availability by specialization: specialization and date.
 - To book: doctor name, patient ID number, and appointment date/time.
 - To cancel: doctor name, patient ID number, and existing appointment date/time.
 - To reschedule: doctor name, patient ID number, old appointment date/time, and new appointment date/time.
 
 Formatting rules:
+- Use DD-MM-YYYY for availability dates.
 - Use DD-MM-YYYY HH:MM for appointment date/time.
 - Patient ID must be 7 or 8 digits.
 - Doctor names must be lowercase and must match one of the listed doctor names.
@@ -54,7 +63,13 @@ After a tool call, explain the result clearly to the patient.
 
 class ClinicGenieAppointmentAgent:
     def __init__(self, model_name: str = "openai/gpt-oss-20b"):
-        self.tools = [set_appointment, cancel_appointment, reschedule_appointment]
+        self.tools = [
+            check_availability_by_doctor,
+            check_availability_by_specialization,
+            set_appointment,
+            cancel_appointment,
+            reschedule_appointment,
+        ]
         self.llm = ChatGroq(model_name=model_name).bind_tools(self.tools)
         self.graph = self._build_graph()
 
@@ -81,12 +96,27 @@ class ClinicGenieAppointmentAgent:
 
         return graph.compile()
 
-    def invoke(self, user_query: str, config: Optional[dict[str, Any]] = None) -> BaseMessage:
+    def invoke_messages(
+        self, messages: list[BaseMessage], config: Optional[dict[str, Any]] = None
+    ) -> list[BaseMessage]:
         result = self.graph.invoke(
-            {"messages": [HumanMessage(content=user_query)]},
+            {"messages": messages},
             config=config,
         )
-        return result["messages"][-1]
+        return result["messages"]
+
+    def invoke(self, user_query: str, config: Optional[dict[str, Any]] = None) -> BaseMessage:
+        result = self.invoke_messages(
+            [HumanMessage(content=user_query)],
+            config=config,
+        )
+        return result[-1]
+
+
+def message_from_role(role: str, content: str) -> BaseMessage:
+    if role == "assistant":
+        return AIMessage(content=content)
+    return HumanMessage(content=content)
 
 
 if __name__ == "__main__":
