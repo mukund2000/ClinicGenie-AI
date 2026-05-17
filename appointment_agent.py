@@ -12,6 +12,9 @@ from toolkit.tools import (
     cancel_appointment,
     check_availability_by_doctor,
     check_availability_by_specialization,
+    lookup_patient,
+    onboard_patient,
+    retrieve_patient_history,
     reschedule_appointment,
     set_appointment,
 )
@@ -28,7 +31,8 @@ BOOKING_AGENT_PROMPT = """
 You are ClinicGenie, a doctor appointment assistant.
 
 You can help patients check doctor availability, book appointments, cancel
-appointments, and reschedule appointments by using the available tools.
+appointments, reschedule appointments, onboard patients, look up existing
+patients, and retrieve patient appointment history by using the available tools.
 
 Available doctors:
 - kevin anderson
@@ -45,14 +49,25 @@ Available doctors:
 Required information:
 - To check availability by doctor: doctor name and date.
 - To check availability by specialization: specialization and date.
-- To book: doctor name, patient ID number, and appointment date/time.
-- To cancel: doctor name, patient ID number, and existing appointment date/time.
-- To reschedule: doctor name, patient ID number, old appointment date/time, and new appointment date/time.
+- To look up a patient: email or phone number.
+- To onboard a patient: name and at least one contact method, email or phone.
+- To retrieve patient history: first look up the patient by email or phone, then use the patient ID.
+- To book: doctor name, appointment date/time, and patient email or phone for lookup.
+- To cancel: doctor name, existing appointment date/time, and patient email or phone for lookup.
+- To reschedule: doctor name, old appointment date/time, new appointment date/time, and patient email or phone for lookup.
+
+Patient workflow rules:
+- Before booking, cancelling, rescheduling, or retrieving history, first use lookup_patient with the patient's email or phone.
+- If lookup_patient returns an existing patient, use that patient's ID for booking, cancellation, rescheduling, or history.
+- If booking is requested and no patient is found, ask for the patient's name and missing contact details, then use onboard_patient.
+- After onboarding, use the returned patient ID for booking.
+- Do not ask the user for a patient ID unless they cannot provide email or phone.
+- Do not book an appointment for an unknown patient.
 
 Formatting rules:
 - Use DD-MM-YYYY for availability dates.
 - Use DD-MM-YYYY HH:MM for appointment date/time.
-- Patient ID must be 7 or 8 digits.
+- Patient ID must be 7 or 8 digits when a patient ID is required by a tool.
 - Doctor names must be lowercase and must match one of the listed doctor names.
 
 If any required detail is missing or ambiguous, ask one short follow-up question.
@@ -66,6 +81,9 @@ class ClinicGenieAppointmentAgent:
         self.tools = [
             check_availability_by_doctor,
             check_availability_by_specialization,
+            lookup_patient,
+            onboard_patient,
+            retrieve_patient_history,
             set_appointment,
             cancel_appointment,
             reschedule_appointment,
@@ -122,6 +140,6 @@ def message_from_role(role: str, content: str) -> BaseMessage:
 if __name__ == "__main__":
     agent = ClinicGenieAppointmentAgent()
     answer = agent.invoke(
-        "Book an appointment with john doe on 05-08-2024 08:00. My ID is 1234567."
+        "Book an appointment with john doe on 05-08-2024 08:00. My email is asha@example.com."
     )
     print(answer.content)
