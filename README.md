@@ -73,6 +73,9 @@ Important endpoint groups:
   - `PATCH /patients/{patient_id}`
 
 - Appointment operations:
+  - `GET /doctors`
+  - `GET /specializations`
+  - `GET /catalog`
   - `GET /appointments/availability/doctor`
   - `GET /appointments/availability/specialization`
   - `POST /appointments/book`
@@ -82,6 +85,12 @@ Important endpoint groups:
 
 - Chat:
   - `POST /chat`
+
+- Observability:
+  - `GET /health`
+  - `GET /health/live`
+  - `GET /health/ready`
+  - `GET /metrics`
 
 ### `database.py`
 
@@ -114,6 +123,8 @@ Important service functions:
 - `get_patient_history(patient_id)`
 - `get_available_slots_by_doctor(date, doctor_name)`
 - `get_available_slots_by_specialization(date, specialization)`
+- `list_doctors()`
+- `list_specializations()`
 
 ### `toolkit/tools.py`
 
@@ -177,27 +188,22 @@ The agent now follows a contact-first patient workflow. For booking, cancellatio
 Responsibilities:
 
 - Displays chat history.
-- Sends user messages to `ClinicGenieAppointmentAgent`.
+- Sends user messages to the `/chat` API endpoint.
 - Shows the assistant response.
 - Provides a patient registration form.
 - Provides patient lookup by email or phone.
+- Loads doctor options from the `/doctors` API endpoint.
 - Stores the currently selected patient in Streamlit session state.
 - Shows appointment history for the selected patient.
-- Books appointments directly with the selected patient context.
+- Books appointments through the API with the selected patient context.
 
-The Streamlit app uses Option B integration: it calls backend service functions directly from `database.py` because it runs in the same process as the project code. This means the Streamlit forms do not require the FastAPI server to be running. The chatbot tab still delegates conversational work to the agent, and the agent delegates real booking operations to `database.py` through `toolkit/tools.py`.
+Boundaries:
 
-### `main.py`
+- May call HTTP endpoints exposed by `api.py`.
+- Must not import `database.py`, `toolkit/tools.py`, or `appointment_agent.py`.
+- Must not initialize or seed the database directly.
 
-`main.py` imports the FastAPI app from `api.py` and initializes the database.
-
-It allows the app to be run using:
-
-```bash
-uvicorn main:app --reload
-```
-
-The API can also be run directly with:
+Run the API with:
 
 ```bash
 uvicorn api:app --reload
@@ -574,12 +580,6 @@ Run the API:
 uvicorn api:app --reload
 ```
 
-Alternative:
-
-```bash
-uvicorn main:app --reload
-```
-
 Open API docs:
 
 ```text
@@ -590,6 +590,46 @@ Run the Streamlit chatbot:
 
 ```bash
 streamlit run streamlit_chatbot.py
+```
+
+### Option C: Run API and UI Together
+
+Open two terminals from the `ClinicGenie-AI` folder.
+
+Terminal 1, API:
+
+```bash
+uvicorn api:app --reload
+```
+
+Terminal 2, UI:
+
+```bash
+$env:CLINICGENIE_API_BASE_URL="http://127.0.0.1:8000"
+streamlit run streamlit_chatbot.py
+```
+
+The Streamlit app expects the FastAPI server at `http://127.0.0.1:8000` by default. Override it with:
+
+```bash
+$env:CLINICGENIE_API_BASE_URL="http://127.0.0.1:8000"
+streamlit run streamlit_chatbot.py
+```
+
+Doctor and specialization values are loaded from the appointment database through the API. Updating seeded appointment data changes the catalog without editing `tools.py`, `appointment_agent.py`, or `streamlit_chatbot.py`.
+
+Observability endpoints:
+
+```text
+http://127.0.0.1:8000/health/live
+http://127.0.0.1:8000/health/ready
+http://127.0.0.1:8000/metrics
+```
+
+Logs are structured JSON by default and include API request timing, DB operation timing, agent invocation timing, and tool call timing. Configure the log level with:
+
+```bash
+$env:CLINICGENIE_LOG_LEVEL="INFO"
 ```
 
 ## Example API Calls
@@ -652,7 +692,7 @@ curl -X POST http://127.0.0.1:8000/chat \
 - Add patient identity verification before appointment changes.
 - Store dates in ISO format instead of `DD-MM-YYYY HH:MM`.
 - Add doctors as a dedicated database table.
-- Add specializations as a reference table.
+- Add specializations as a dedicated database table.
 - Add automated tests for service and API behavior.
 - Add structured response models for all API endpoints.
 - Add pagination for appointment history.
