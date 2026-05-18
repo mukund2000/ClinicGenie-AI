@@ -1,5 +1,5 @@
 from sqlite3 import IntegrityError
-from typing import Literal, Optional
+from typing import Optional
 
 from langchain_core.tools import tool
 
@@ -12,32 +12,11 @@ from database import (
     get_available_slots_by_specialization,
     get_patient_by_contact,
     get_patient_history,
+    list_doctors,
+    list_specializations,
     reschedule_appointment as reschedule_patient_appointment,
 )
-
-
-DoctorName = Literal[
-    "kevin anderson",
-    "robert martinez",
-    "susan davis",
-    "daniel miller",
-    "sarah wilson",
-    "michael green",
-    "lisa brown",
-    "jane smith",
-    "emily johnson",
-    "john doe",
-]
-
-Specialization = Literal[
-    "general_dentist",
-    "cosmetic_dentist",
-    "prosthodontist",
-    "pediatric_dentist",
-    "emergency_dentist",
-    "oral_surgeon",
-    "orthodontist",
-]
+from observability import observe_operation
 
 
 def _to_am_pm(time_str: str) -> str:
@@ -57,7 +36,50 @@ def _format_patient(patient: dict) -> str:
     )
 
 
+def _normalize_catalog_value(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _match_catalog_value(value: str, catalog: list[str]) -> Optional[str]:
+    normalized_value = _normalize_catalog_value(value)
+    for item in catalog:
+        if _normalize_catalog_value(item) == normalized_value:
+            return item
+    return None
+
+
+def _format_catalog_values(values: list[str]) -> str:
+    if not values:
+        return "none configured"
+    return ", ".join(values)
+
+
+@observe_operation(layer="tool", logger_name=__name__)
+def get_catalog_prompt_context() -> str:
+    return (
+        "Available doctors from the appointment database:\n"
+        f"{_format_catalog_values(list_doctors())}\n\n"
+        "Available specializations from the appointment database:\n"
+        f"{_format_catalog_values(list_specializations())}"
+    )
+
+
+def _unknown_doctor_message() -> str:
+    return (
+        "Doctor not found in the appointment database. Available doctors: "
+        f"{_format_catalog_values(list_doctors())}."
+    )
+
+
+def _unknown_specialization_message() -> str:
+    return (
+        "Specialization not found in the appointment database. Available specializations: "
+        f"{_format_catalog_values(list_specializations())}."
+    )
+
+
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def lookup_patient(
     email: Optional[str] = None,
     phone: Optional[str] = None,
@@ -76,6 +98,7 @@ def lookup_patient(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def onboard_patient(
     name: str,
     email: Optional[str] = None,
@@ -100,6 +123,7 @@ def onboard_patient(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def retrieve_patient_history(
     id_number: IdentificationNumberModel,
 ):
@@ -121,17 +145,22 @@ def retrieve_patient_history(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def check_availability_by_doctor(
     desired_date: DateModel,
-    doctor_name: DoctorName,
+    doctor_name: str,
 ):
     """
     Checking the database if we have availability for the specific doctor.
     The parameters should be mentioned by the user in the query.
     """
+    matched_doctor = _match_catalog_value(doctor_name, list_doctors())
+    if matched_doctor is None:
+        return _unknown_doctor_message()
+
     rows = [
         appointment["date_slot"].split(" ")[-1]
-        for appointment in get_available_slots_by_doctor(desired_date.date, doctor_name)
+        for appointment in get_available_slots_by_doctor(desired_date.date, matched_doctor)
     ]
 
     if len(rows) == 0:
@@ -143,15 +172,23 @@ def check_availability_by_doctor(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def check_availability_by_specialization(
     desired_date: DateModel,
-    specialization: Specialization,
+    specialization: str,
 ):
     """
     Checking the database if we have availability for the specific specialization.
     The parameters should be mentioned by the user in the query.
     """
-    appointments = get_available_slots_by_specialization(desired_date.date, specialization)
+    matched_specialization = _match_catalog_value(specialization, list_specializations())
+    if matched_specialization is None:
+        return _unknown_specialization_message()
+
+    appointments = get_available_slots_by_specialization(
+        desired_date.date,
+        matched_specialization,
+    )
     slots_by_doctor: dict[str, list[str]] = {}
     for appointment in appointments:
         slots_by_doctor.setdefault(appointment["doctor_name"], []).append(
@@ -173,18 +210,23 @@ def check_availability_by_specialization(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def set_appointment(
     desired_date: DateTimeModel,
     id_number: IdentificationNumberModel,
-    doctor_name: DoctorName,
+    doctor_name: str,
 ):
     """
     Set appointment or slot with the doctor.
     The parameters MUST be mentioned by the user in the query.
     """
+    matched_doctor = _match_catalog_value(doctor_name, list_doctors())
+    if matched_doctor is None:
+        return _unknown_doctor_message()
+
     appointment = create_appointment(
         patient_id=id_number.id,
-        doctor_name=doctor_name,
+        doctor_name=matched_doctor,
         date_slot=desired_date.date,
     )
     if appointment is None:
@@ -193,18 +235,23 @@ def set_appointment(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def cancel_appointment(
     date: DateTimeModel,
     id_number: IdentificationNumberModel,
-    doctor_name: DoctorName,
+    doctor_name: str,
 ):
     """
     Canceling an appointment.
     The parameters MUST be mentioned by the user in the query.
     """
+    matched_doctor = _match_catalog_value(doctor_name, list_doctors())
+    if matched_doctor is None:
+        return _unknown_doctor_message()
+
     appointment = cancel_patient_appointment(
         patient_id=id_number.id,
-        doctor_name=doctor_name,
+        doctor_name=matched_doctor,
         date_slot=date.date,
     )
     if appointment is None:
@@ -213,19 +260,24 @@ def cancel_appointment(
 
 
 @tool
+@observe_operation(layer="tool", logger_name=__name__)
 def reschedule_appointment(
     old_date: DateTimeModel,
     new_date: DateTimeModel,
     id_number: IdentificationNumberModel,
-    doctor_name: DoctorName,
+    doctor_name: str,
 ):
     """
     Rescheduling an appointment.
     The parameters MUST be mentioned by the user in the query.
     """
+    matched_doctor = _match_catalog_value(doctor_name, list_doctors())
+    if matched_doctor is None:
+        return _unknown_doctor_message()
+
     appointment = reschedule_patient_appointment(
         patient_id=id_number.id,
-        doctor_name=doctor_name,
+        doctor_name=matched_doctor,
         old_date_slot=old_date.date,
         new_date_slot=new_date.date,
     )
