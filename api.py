@@ -1,11 +1,14 @@
+import time
 from typing import Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlite3 import IntegrityError
 
 from appointment_agent import ClinicGenieAppointmentAgent, message_from_role
 from database import (
+    check_database_health,
     count_appointments,
     create_appointment,
     create_patient,
@@ -17,11 +20,14 @@ from database import (
     get_patient_by_phone,
     get_patient_history,
     initialize_database,
+    list_doctors,
+    list_specializations,
     seed_appointments_from_csv,
     update_patient,
     cancel_appointment as cancel_patient_appointment,
     reschedule_appointment as reschedule_patient_appointment,
 )
+from observability import get_logger, metrics
 
 
 app = FastAPI(
@@ -31,6 +37,21 @@ app = FastAPI(
 )
 
 agent: Optional[ClinicGenieAppointmentAgent] = None
+logger = get_logger(__name__)
+
+
+def _safe_request_path(request: Request) -> str:
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    if route_path:
+        return str(route_path)
+
+    path = request.url.path
+    if path.startswith("/patients/by-email/"):
+        return "/patients/by-email/{email}"
+    if path.startswith("/patients/by-phone/"):
+        return "/patients/by-phone/{phone}"
+    return path
 
 
 class PatientCreate(BaseModel):
@@ -70,16 +91,126 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
 
 
+@app.middleware("http")
+async def log_api_requests(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", str(uuid4()))
+    started_at = time.perf_counter()
+    path = _safe_request_path(request)
+    method = request.method
+
+    metrics.increment("api.requests.started")
+    metrics.increment(f"api.requests.{method}.{path}.started")
+    logger.info(
+        "api_request_started",
+        extra={
+            "layer": "api",
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "client": request.client.host if request.client else None,
+        },
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        metrics.increment("api.requests.failed")
+        path = _safe_request_path(request)
+        metrics.increment(f"api.requests.{method}.{path}.failed")
+        metrics.observe_duration("api.requests.duration_ms", duration_ms)
+        logger.exception(
+            "api_request_failed",
+            extra={
+                "layer": "api",
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                "duration_ms": round(duration_ms, 3),
+            },
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    path = _safe_request_path(request)
+    metrics.increment("api.requests.succeeded")
+    metrics.increment(f"api.requests.{method}.{path}.succeeded")
+    metrics.increment(f"api.responses.{response.status_code}")
+    metrics.observe_duration("api.requests.duration_ms", duration_ms)
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "api_request_succeeded",
+        extra={
+            "layer": "api",
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status_code": response.status_code,
+            "duration_ms": round(duration_ms, 3),
+        },
+    )
+    return response
+
+
 @app.on_event("startup")
 def startup() -> None:
+    logger.info("api_startup_started", extra={"layer": "api"})
     initialize_database()
     if count_appointments() == 0:
-        seed_appointments_from_csv()
+        inserted_count = seed_appointments_from_csv()
+        logger.info(
+            "appointments_seeded",
+            extra={"layer": "api", "inserted_count": inserted_count},
+        )
+    logger.info("api_startup_succeeded", extra={"layer": "api"})
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict:
+    return {
+        "status": "ok",
+        "checks": {
+            "api": {"status": "ok"},
+            "database": check_database_health(),
+        },
+    }
+
+
+@app.get("/health/live")
+def liveness() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def readiness() -> dict:
+    database_health = check_database_health()
+    return {
+        "status": database_health["status"],
+        "checks": {"database": database_health},
+    }
+
+
+@app.get("/metrics")
+def read_metrics() -> dict:
+    return metrics.snapshot()
+
+
+@app.get("/doctors")
+def doctors() -> dict[str, list[str]]:
+    return {"doctors": list_doctors()}
+
+
+@app.get("/specializations")
+def specializations() -> dict[str, list[str]]:
+    return {"specializations": list_specializations()}
+
+
+@app.get("/catalog")
+def catalog() -> dict[str, list[str]]:
+    return {
+        "doctors": list_doctors(),
+        "specializations": list_specializations(),
+    }
 
 
 @app.post("/patients", status_code=status.HTTP_201_CREATED)
@@ -246,7 +377,9 @@ def reschedule_appointment(payload: RescheduleRequest) -> dict:
 def chat(payload: ChatRequest) -> dict[str, str]:
     global agent
     if agent is None:
+        logger.info("agent_lazy_initialization_started", extra={"layer": "api"})
         agent = ClinicGenieAppointmentAgent()
+        logger.info("agent_lazy_initialization_succeeded", extra={"layer": "api"})
 
     messages = [message_from_role(item.role, item.content) for item in payload.history]
     messages.append(message_from_role("user", payload.message))

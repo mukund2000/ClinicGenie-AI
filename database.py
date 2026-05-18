@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from observability import observe_operation
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -35,6 +37,7 @@ def db_connection() -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def initialize_database() -> None:
     global _DATABASE_INITIALIZED
     if _DATABASE_INITIALIZED and DATABASE_PATH.exists():
@@ -71,6 +74,7 @@ def initialize_database() -> None:
     _DATABASE_INITIALIZED = True
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def ensure_database_initialized() -> None:
     if not _DATABASE_INITIALIZED or not DATABASE_PATH.exists():
         initialize_database()
@@ -177,6 +181,7 @@ def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_patient(patient_id: int) -> Optional[dict[str, Any]]:
     ensure_database_initialized()
     with db_connection() as connection:
@@ -187,6 +192,7 @@ def get_patient(patient_id: int) -> Optional[dict[str, Any]]:
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_patient_by_email(email: str) -> Optional[dict[str, Any]]:
     ensure_database_initialized()
     with db_connection() as connection:
@@ -197,6 +203,7 @@ def get_patient_by_email(email: str) -> Optional[dict[str, Any]]:
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_patient_by_phone(phone: str) -> Optional[dict[str, Any]]:
     ensure_database_initialized()
     with db_connection() as connection:
@@ -207,6 +214,7 @@ def get_patient_by_phone(phone: str) -> Optional[dict[str, Any]]:
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_patient_by_contact(
     email: Optional[str] = None,
     phone: Optional[str] = None,
@@ -232,6 +240,7 @@ def get_patient_by_contact(
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def create_patient(
     name: str,
     email: Optional[str] = None,
@@ -257,6 +266,7 @@ def create_patient(
     return patient
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def update_patient(
     patient_id: int,
     name: Optional[str] = None,
@@ -289,6 +299,7 @@ def update_patient(
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def record_patient_history(
     patient_id: int,
     action: str,
@@ -335,6 +346,7 @@ def _record_patient_history(
     ).fetchone()
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def create_appointment_slot(
     date_slot: str,
     specialization: str,
@@ -373,6 +385,7 @@ def create_appointment_slot(
     return appointment
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_available_slots_by_doctor(date: str, doctor_name: str) -> list[dict[str, Any]]:
     ensure_database_initialized()
     with db_connection() as connection:
@@ -390,6 +403,7 @@ def get_available_slots_by_doctor(date: str, doctor_name: str) -> list[dict[str,
     return _rows_to_dicts(rows)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_available_slots_by_specialization(
     date: str,
     specialization: str,
@@ -410,6 +424,39 @@ def get_available_slots_by_specialization(
     return _rows_to_dicts(rows)
 
 
+@observe_operation(layer="db", logger_name=__name__)
+def list_doctors() -> list[str]:
+    ensure_database_initialized()
+    with db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT doctor_name
+            FROM appointments
+            WHERE doctor_name IS NOT NULL
+              AND trim(doctor_name) != ''
+            ORDER BY lower(doctor_name)
+            """
+        ).fetchall()
+    return [str(row["doctor_name"]) for row in rows]
+
+
+@observe_operation(layer="db", logger_name=__name__)
+def list_specializations() -> list[str]:
+    ensure_database_initialized()
+    with db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT specialization
+            FROM appointments
+            WHERE specialization IS NOT NULL
+              AND trim(specialization) != ''
+            ORDER BY lower(specialization)
+            """
+        ).fetchall()
+    return [str(row["specialization"]) for row in rows]
+
+
+@observe_operation(layer="db", logger_name=__name__)
 def create_appointment(
     patient_id: int,
     doctor_name: str,
@@ -461,6 +508,7 @@ def create_appointment(
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def cancel_appointment(
     patient_id: int,
     doctor_name: str,
@@ -506,6 +554,7 @@ def cancel_appointment(
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def reschedule_appointment(
     patient_id: int,
     doctor_name: str,
@@ -575,6 +624,7 @@ def reschedule_appointment(
     return _row_to_dict(row)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def get_patient_history(patient_id: int) -> list[dict[str, Any]]:
     ensure_database_initialized()
     with db_connection() as connection:
@@ -610,6 +660,7 @@ def _parse_patient_id(value: str) -> Optional[int]:
     return int(float(value))
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def seed_appointments_from_csv(csv_path: Path = DOCTOR_AVAILABILITY_CSV) -> int:
     ensure_database_initialized()
 
@@ -660,11 +711,30 @@ def seed_appointments_from_csv(csv_path: Path = DOCTOR_AVAILABILITY_CSV) -> int:
     return len(appointments)
 
 
+@observe_operation(layer="db", logger_name=__name__)
 def count_appointments() -> int:
     ensure_database_initialized()
     with db_connection() as connection:
         row = connection.execute("SELECT COUNT(*) AS total FROM appointments").fetchone()
     return int(row["total"])
+
+
+@observe_operation(layer="db", logger_name=__name__)
+def check_database_health() -> dict[str, Any]:
+    ensure_database_initialized()
+    with db_connection() as connection:
+        connection.execute("SELECT 1").fetchone()
+        patient_count = connection.execute("SELECT COUNT(*) AS total FROM patients").fetchone()
+        appointment_count = connection.execute(
+            "SELECT COUNT(*) AS total FROM appointments"
+        ).fetchone()
+    return {
+        "status": "ok",
+        "database_path": str(DATABASE_PATH),
+        "database_exists": DATABASE_PATH.exists(),
+        "patients": int(patient_count["total"]),
+        "appointments": int(appointment_count["total"]),
+    }
 
 
 if __name__ == "__main__":

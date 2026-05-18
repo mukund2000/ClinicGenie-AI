@@ -8,10 +8,12 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
+from observability import get_logger, observe_operation
 from toolkit.tools import (
     cancel_appointment,
     check_availability_by_doctor,
     check_availability_by_specialization,
+    get_catalog_prompt_context,
     lookup_patient,
     onboard_patient,
     retrieve_patient_history,
@@ -21,30 +23,21 @@ from toolkit.tools import (
 
 
 load_dotenv()
+logger = get_logger(__name__)
 
 
 class AppointmentAgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-BOOKING_AGENT_PROMPT = """
+BOOKING_AGENT_PROMPT_TEMPLATE = """
 You are ClinicGenie, a doctor appointment assistant.
 
 You can help patients check doctor availability, book appointments, cancel
 appointments, reschedule appointments, onboard patients, look up existing
 patients, and retrieve patient appointment history by using the available tools.
 
-Available doctors:
-- kevin anderson
-- robert martinez
-- susan davis
-- daniel miller
-- sarah wilson
-- michael green
-- lisa brown
-- jane smith
-- emily johnson
-- john doe
+{catalog_context}
 
 Required information:
 - To check availability by doctor: doctor name and date.
@@ -68,7 +61,7 @@ Formatting rules:
 - Use DD-MM-YYYY for availability dates.
 - Use DD-MM-YYYY HH:MM for appointment date/time.
 - Patient ID must be 7 or 8 digits when a patient ID is required by a tool.
-- Doctor names must be lowercase and must match one of the listed doctor names.
+- Doctor names and specializations must match the current appointment database catalog.
 
 If any required detail is missing or ambiguous, ask one short follow-up question.
 Do not call a tool until you have all required details.
@@ -78,6 +71,10 @@ After a tool call, explain the result clearly to the patient.
 
 class ClinicGenieAppointmentAgent:
     def __init__(self, model_name: str = "openai/gpt-oss-20b"):
+        logger.info(
+            "agent_initialization_started",
+            extra={"layer": "agent", "model_name": model_name},
+        )
         self.tools = [
             check_availability_by_doctor,
             check_availability_by_specialization,
@@ -90,12 +87,25 @@ class ClinicGenieAppointmentAgent:
         ]
         self.llm = ChatGroq(model_name=model_name).bind_tools(self.tools)
         self.graph = self._build_graph()
+        logger.info(
+            "agent_initialization_succeeded",
+            extra={
+                "layer": "agent",
+                "model_name": model_name,
+                "tool_count": len(self.tools),
+            },
+        )
 
+    @observe_operation(layer="agent", logger_name=__name__)
     def _assistant_node(self, state: AppointmentAgentState) -> dict[str, Any]:
-        messages = [SystemMessage(content=BOOKING_AGENT_PROMPT)] + state["messages"]
+        prompt = BOOKING_AGENT_PROMPT_TEMPLATE.format(
+            catalog_context=get_catalog_prompt_context()
+        )
+        messages = [SystemMessage(content=prompt)] + state["messages"]
         response = self.llm.invoke(messages)
         return {"messages": [response]}
 
+    @observe_operation(layer="agent", logger_name=__name__)
     def _build_graph(self):
         graph = StateGraph(AppointmentAgentState)
         graph.add_node("assistant", self._assistant_node)
@@ -114,6 +124,7 @@ class ClinicGenieAppointmentAgent:
 
         return graph.compile()
 
+    @observe_operation(layer="agent", logger_name=__name__)
     def invoke_messages(
         self, messages: list[BaseMessage], config: Optional[dict[str, Any]] = None
     ) -> list[BaseMessage]:
@@ -123,6 +134,7 @@ class ClinicGenieAppointmentAgent:
         )
         return result["messages"]
 
+    @observe_operation(layer="agent", logger_name=__name__)
     def invoke(self, user_query: str, config: Optional[dict[str, Any]] = None) -> BaseMessage:
         result = self.invoke_messages(
             [HumanMessage(content=user_query)],
@@ -140,6 +152,6 @@ def message_from_role(role: str, content: str) -> BaseMessage:
 if __name__ == "__main__":
     agent = ClinicGenieAppointmentAgent()
     answer = agent.invoke(
-        "Book an appointment with john doe on 05-08-2024 08:00. My email is asha@example.com."
+        "Which doctors are available on 05-08-2024?"
     )
     print(answer.content)
