@@ -1,55 +1,102 @@
-from sqlite3 import IntegrityError
+import json
+import os
+from typing import Any, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import streamlit as st
 
-from appointment_agent import ClinicGenieAppointmentAgent, message_from_role
-from database import (
-    count_appointments,
-    create_appointment,
-    create_patient,
-    get_available_slots_by_doctor,
-    get_patient_by_contact,
-    get_patient_history,
-    initialize_database,
-    seed_appointments_from_csv,
-)
 
-
-DOCTORS = [
-    "john doe",
-    "jane smith",
-    "emily johnson",
-    "lisa brown",
-    "michael green",
-    "sarah wilson",
-    "daniel miller",
-    "susan davis",
-    "robert martinez",
-    "kevin anderson",
-]
+API_BASE_URL = os.getenv("CLINICGENIE_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
 st.set_page_config(page_title="ClinicGenie", page_icon="CG", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    section.main > div {
+        padding-bottom: 5.5rem;
+    }
 
-@st.cache_resource
-def get_agent() -> ClinicGenieAppointmentAgent:
-    return ClinicGenieAppointmentAgent()
+    div[data-testid="stChatInput"] {
+        position: fixed;
+        bottom: 1rem;
+        z-index: 1000;
+        background: var(--background-color);
+        width: min(58rem, calc(100vw - 24rem));
+    }
+
+    @media (max-width: 900px) {
+        div[data-testid="stChatInput"] {
+            left: 1rem;
+            right: 1rem;
+            width: auto;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
-@st.cache_resource
-def prepare_database() -> bool:
-    initialize_database()
-    if count_appointments() == 0:
-        seed_appointments_from_csv()
-    return True
+class ApiClientError(Exception):
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
-def build_agent_messages():
-    return [
-        message_from_role(message["role"], message["content"])
-        for message in st.session_state.messages
-    ]
+def api_request(
+    method: str,
+    path: str,
+    payload: Optional[dict[str, Any]] = None,
+    params: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    query = ""
+    if params:
+        query = "?" + urlencode(
+            {key: value for key, value in params.items() if value not in (None, "")}
+        )
+
+    body = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = Request(
+        f"{API_BASE_URL}{path}{query}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+
+    try:
+        with urlopen(request, timeout=20) as response:
+            data = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.reason
+        response_body = exc.read().decode("utf-8")
+        if response_body:
+            try:
+                detail = json.loads(response_body).get("detail", detail)
+            except json.JSONDecodeError:
+                detail = response_body
+        raise ApiClientError(str(detail), status_code=exc.code) from exc
+    except URLError as exc:
+        raise ApiClientError(
+            f"Could not reach ClinicGenie API at {API_BASE_URL}. Start it with `uvicorn api:app --reload`."
+        ) from exc
+
+    if not data:
+        return {}
+    return json.loads(data)
+
+
+@st.cache_data(ttl=60)
+def get_doctors() -> list[str]:
+    return api_request("GET", "/doctors")["doctors"]
 
 
 def set_selected_patient(patient: dict) -> None:
@@ -63,8 +110,6 @@ def render_patient_summary(patient: dict) -> None:
     st.write(f"Phone: {patient.get('phone') or 'Not provided'}")
     st.write(f"DOB: {patient.get('dob') or 'Not provided'}")
 
-
-prepare_database()
 
 if "selected_patient" not in st.session_state:
     st.session_state.selected_patient = None
@@ -92,6 +137,16 @@ st.title("ClinicGenie Appointment Console")
 st.caption("Chat with the assistant, manage patients, and book appointments from one SQLite-backed workspace.")
 
 with st.sidebar:
+    st.subheader("API")
+    st.write(f"Base URL: `{API_BASE_URL}`")
+    try:
+        health = api_request("GET", "/health")
+    except ApiClientError as exc:
+        st.error(str(exc))
+    else:
+        st.success(f"Status: {health.get('status', 'unknown')}")
+
+    st.divider()
     st.subheader("Current patient")
     if st.session_state.selected_patient:
         render_patient_summary(st.session_state.selected_patient)
@@ -122,9 +177,10 @@ with tab_chat:
         ]
         st.rerun()
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
+    with st.container(height=520):
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.write(message["content"])
 
     user_input = st.chat_input("Ask ClinicGenie...")
 
@@ -136,10 +192,16 @@ with tab_chat:
         with st.chat_message("assistant"):
             with st.spinner("Checking appointment details..."):
                 try:
-                    agent = get_agent()
-                    result_messages = agent.invoke_messages(build_agent_messages())
-                    assistant_response = result_messages[-1].content
-                except Exception as exc:
+                    chat_response = api_request(
+                        "POST",
+                        "/chat",
+                        payload={
+                            "message": user_input,
+                            "history": st.session_state.messages[:-1],
+                        },
+                    )
+                    assistant_response = chat_response["response"]
+                except ApiClientError as exc:
                     assistant_response = f"Sorry, I could not process that request: {exc}"
 
             st.write(assistant_response)
@@ -162,12 +224,17 @@ with tab_patients:
             if not lookup_email and not lookup_phone:
                 st.warning("Enter an email or phone number.")
             else:
-                patient = get_patient_by_contact(
-                    email=lookup_email or None,
-                    phone=lookup_phone or None,
-                )
-                if patient is None:
-                    st.error("No patient found for that contact.")
+                try:
+                    patient = api_request(
+                        "GET",
+                        "/patients/lookup",
+                        params={
+                            "email": lookup_email or None,
+                            "phone": lookup_phone or None,
+                        },
+                    )
+                except ApiClientError as exc:
+                    st.error(str(exc))
                 else:
                     set_selected_patient(patient)
                     st.success("Patient selected.")
@@ -189,14 +256,18 @@ with tab_patients:
                 st.warning("Provide at least an email or phone number.")
             else:
                 try:
-                    patient = create_patient(
-                        name=name,
-                        email=email or None,
-                        phone=phone or None,
-                        dob=dob or None,
+                    patient = api_request(
+                        "POST",
+                        "/patients",
+                        payload={
+                            "name": name,
+                            "email": email or None,
+                            "phone": phone or None,
+                            "dob": dob or None,
+                        },
                     )
-                except IntegrityError:
-                    st.error("A patient with that email or phone already exists.")
+                except ApiClientError as exc:
+                    st.error(str(exc))
                 else:
                     set_selected_patient(patient)
                     st.success("Patient registered and selected.")
@@ -212,11 +283,16 @@ with tab_patients:
         if st.button("Refresh history"):
             st.rerun()
 
-        history = get_patient_history(patient["id"])
-        if len(history) == 0:
-            st.write("No appointment history found.")
+        try:
+            history_response = api_request("GET", f"/patients/{patient['id']}/history")
+        except ApiClientError as exc:
+            st.error(str(exc))
         else:
-            st.dataframe(history, use_container_width=True, hide_index=True)
+            history = history_response["history"]
+            if len(history) == 0:
+                st.write("No appointment history found.")
+            else:
+                st.dataframe(history, use_container_width=True, hide_index=True)
 
 with tab_booking:
     st.subheader("Book Appointment With Patient Context")
@@ -232,24 +308,48 @@ with tab_booking:
             render_patient_summary(patient)
 
         with booking_col:
-            with st.form("appointment_booking_form"):
-                doctor_name = st.selectbox("Doctor", DOCTORS)
-                availability_date = st.text_input("Availability date", value="05-08-2024")
-                check_availability = st.form_submit_button("Check availability")
+            try:
+                doctors = get_doctors()
+            except ApiClientError as exc:
+                st.error(str(exc))
+                doctors = []
 
-            if check_availability:
-                slots = get_available_slots_by_doctor(availability_date, doctor_name)
-                if len(slots) == 0:
-                    st.warning("No available slots for that doctor and date.")
-                    st.session_state.available_slots = []
-                    st.session_state.availability_context = None
-                else:
-                    st.session_state.available_slots = slots
-                    st.session_state.availability_context = {
-                        "doctor_name": doctor_name,
-                        "date": availability_date,
-                    }
-                    st.success(f"Found {len(slots)} available slots.")
+            if len(doctors) == 0:
+                st.info("No doctors are configured in the appointment catalog.")
+                st.session_state.available_slots = []
+                st.session_state.availability_context = None
+                check_availability = False
+            else:
+                with st.form("appointment_booking_form"):
+                    doctor_name = st.selectbox("Doctor", doctors)
+                    availability_date = st.text_input("Availability date", value="05-08-2024")
+                    check_availability = st.form_submit_button("Check availability")
+
+                if check_availability:
+                    try:
+                        availability = api_request(
+                            "GET",
+                            "/appointments/availability/doctor",
+                            params={
+                                "date": availability_date,
+                                "doctor_name": doctor_name,
+                            },
+                        )
+                    except ApiClientError as exc:
+                        st.error(str(exc))
+                    else:
+                        slots = availability["available_slots"]
+                        if len(slots) == 0:
+                            st.warning("No available slots for that doctor and date.")
+                            st.session_state.available_slots = []
+                            st.session_state.availability_context = None
+                        else:
+                            st.session_state.available_slots = slots
+                            st.session_state.availability_context = {
+                                "doctor_name": doctor_name,
+                                "date": availability_date,
+                            }
+                            st.success(f"Found {len(slots)} available slots.")
 
             slots = st.session_state.available_slots
             slot_options = [slot["date_slot"] for slot in slots]
@@ -270,13 +370,18 @@ with tab_booking:
 
             if book_submitted:
                 context = st.session_state.availability_context or {}
-                appointment = create_appointment(
-                    patient_id=patient["id"],
-                    doctor_name=context["doctor_name"],
-                    date_slot=date_slot,
-                )
-                if appointment is None:
-                    st.error("Slot is no longer available or patient could not be found.")
+                try:
+                    appointment = api_request(
+                        "POST",
+                        "/appointments/book",
+                        payload={
+                            "patient_id": patient["id"],
+                            "doctor_name": context["doctor_name"],
+                            "date_slot": date_slot,
+                        },
+                    )
+                except ApiClientError as exc:
+                    st.error(str(exc))
                 else:
                     st.success("Appointment booked.")
                     st.json(appointment)
