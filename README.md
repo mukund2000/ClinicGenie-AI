@@ -4,10 +4,20 @@
 
 ClinicGenie-AI is a doctor appointment system with two user-facing entry points:
 
-1. A FastAPI HTTP API for patient onboarding, lookup, appointment booking, cancellation, rescheduling, availability checks, history, and chat.
+1. A FastAPI HTTP API for patient onboarding, lookup, appointment booking, cancellation, rescheduling, availability checks (single day or date range), history, and chat.
 2. A Streamlit chatbot UI that lets patients interact conversationally with the appointment agent.
 
-Both paths are designed to use the same SQLite-backed service layer in `database.py`. This keeps appointment state consistent whether a request comes from an API client or from the AI chatbot tools.
+Both paths are designed to use the same SQLite-backed service layer in `core/database.py`. This keeps appointment state consistent whether a request comes from an API client or from the AI chatbot tools.
+
+### Key Features
+
+- **Single-day availability**: Check availability for a specific doctor or specialization on a given date
+- **Date range search**: Find all available doctors or a specific doctor's availability within a date range
+- **Patient management**: Onboard, lookup, and update patient profiles
+- **Appointment operations**: Book, cancel, and reschedule appointments
+- **Conversation interface**: Natural language chatbot for appointment operations
+- **REST API**: Full HTTP API for programmatic access
+- **Observability**: Structured logging and metrics endpoints
 
 ## High-Level Architecture
 
@@ -16,11 +26,15 @@ Client / Browser / API Consumer
         |
         v
 FastAPI app
-api.py
+main.py
+        |
+        v
+FastAPI controllers
+controllers/
         |
         v
 SQLite service layer
-database.py
+core/database.py
         |
         v
 SQLite database
@@ -28,11 +42,11 @@ data/clinicgenie.db
 
 
 Streamlit chatbot
-streamlit_chatbot.py
+client/streamlit_chatbot.py
         |
         v
 LangGraph appointment agent
-appointment_agent.py
+agent/appointment_agent.py
         |
         v
 LangChain tools
@@ -40,27 +54,70 @@ toolkit/tools.py
         |
         v
 SQLite service layer
-database.py
+core/database.py
         |
         v
 SQLite database
 data/clinicgenie.db
 ```
 
+## Project Structure
+
+```text
+ClinicGenie-AI/
+├── core/
+│   ├── __init__.py
+│   └── database.py              # SQLite service layer
+├── agent/
+│   ├── __init__.py
+│   └── appointment_agent.py     # LangGraph/LangChain agent
+├── controllers/
+│   ├── __init__.py
+│   ├── patient_controller.py
+│   ├── appointment_chat_controller.py
+│   ├── doctor_availability_controller.py
+│   └── system_controller.py
+├── client/
+│   └── streamlit_chatbot.py     # Streamlit UI
+├── data/
+│   ├── clinicgenie.db
+│   └── doctor_availability.csv
+├── data_models/
+│   └── models.py
+├── toolkit/
+│   └── tools.py                 # LangChain tools
+├── main.py                      # FastAPI app
+├── requirements.txt
+└── README.md
+```
+
 ## Main Components
 
-### `api.py`
+### `main.py`
 
-`api.py` defines the FastAPI application and exposes the backend as HTTP endpoints.
+`main.py` defines the FastAPI application and registers the route controllers.
 
 Responsibilities:
 
 - Starts and initializes the database on app startup.
 - Seeds appointment slots from `data/doctor_availability.csv` when the SQLite appointment table is empty.
-- Validates request payloads with Pydantic models.
-- Converts service-layer results into HTTP responses.
-- Returns appropriate HTTP errors for missing patients, unavailable slots, duplicate contacts, and invalid operations.
-- Exposes `/chat` to call the existing appointment agent from an API client.
+- Registers API middleware, request logging, and routers from `controllers/`.
+- Keeps app composition separate from endpoint handler code.
+
+### `controllers/`
+
+`controllers/` contains the FastAPI route groups. The controllers validate request payloads with Pydantic models, call the service layer or appointment agent, and map results to HTTP responses.
+
+Controller files:
+
+- `controllers/patient_controller.py`
+  - Patient onboarding, lookup, updates, and patient history.
+- `controllers/appointment_chat_controller.py`
+  - Doctor catalog, appointment availability, booking, cancellation, rescheduling, appointment history, and chat.
+- `controllers/doctor_availability_controller.py`
+  - Doctor availability search by date range for all doctors and specific doctors.
+- `controllers/system_controller.py`
+  - Health, readiness, liveness, and metrics endpoints.
 
 Important endpoint groups:
 
@@ -83,6 +140,10 @@ Important endpoint groups:
   - `POST /appointments/reschedule`
   - `GET /appointments/history/{patient_id}`
 
+- Doctor availability by date range:
+  - `POST /doctors/search-available` - Search all available doctors in a date range
+  - `GET /doctors/{doctor_name}/search-available` - Search specific doctor's availability in date range
+
 - Chat:
   - `POST /chat`
 
@@ -92,9 +153,9 @@ Important endpoint groups:
   - `GET /health/ready`
   - `GET /metrics`
 
-### `database.py`
+### `core/database.py`
 
-`database.py` is the main service and persistence layer. It owns all direct SQLite access.
+`core/database.py` is the main service and persistence layer. It owns all direct SQLite access.
 
 Responsibilities:
 
@@ -108,6 +169,7 @@ Responsibilities:
 - Records appointment history for patient activity.
 - Reads patient history.
 - Seeds appointment slot data from CSV into SQLite.
+- Searches for available doctors within a date range.
 
 Important service functions:
 
@@ -123,6 +185,8 @@ Important service functions:
 - `get_patient_history(patient_id)`
 - `get_available_slots_by_doctor(date, doctor_name)`
 - `get_available_slots_by_specialization(date, specialization)`
+- `search_doctors_by_date_range(start_date, end_date)` - Search all available doctors in date range
+- `search_doctor_availability_by_name_and_date_range(doctor_name, start_date, end_date)` - Search specific doctor's availability
 - `list_doctors()`
 - `list_specializations()`
 
@@ -156,34 +220,37 @@ Patient tools:
 
 Appointment tools:
 
-- `check_availability_by_doctor`
-- `check_availability_by_specialization`
-- `set_appointment`
-- `cancel_appointment`
-- `reschedule_appointment`
+- `check_availability_by_doctor` - Check doctor availability on a specific date
+- `check_availability_by_specialization` - Check specialization availability on a specific date
+- `search_doctors_by_date_range` - Search all available doctors within a date range
+- `search_doctor_availability` - Search specific doctor's availability within a date range
+- `set_appointment` - Book an appointment
+- `cancel_appointment` - Cancel an appointment
+- `reschedule_appointment` - Reschedule an appointment
 
-### `appointment_agent.py`
+### `agent/appointment_agent.py`
 
-`appointment_agent.py` defines the LangGraph-powered appointment assistant.
+`agent/appointment_agent.py` defines the LangGraph-powered appointment assistant.
 
 Responsibilities:
 
 - Creates the LLM-backed appointment agent.
 - Binds appointment tools from `toolkit/tools.py`.
 - Binds patient lookup, onboarding, and history tools from `toolkit/tools.py`.
+- Supports date range searches for doctor availability.
 - Maintains the conversation flow:
   - user message
   - assistant reasoning
   - tool call if needed
   - final assistant response
 
-The agent can check availability, book, cancel, and reschedule appointments when the user provides the required details.
+The agent can check availability (single day or date range), book, cancel, and reschedule appointments when the user provides the required details.
 
-The agent now follows a contact-first patient workflow. For booking, cancellation, rescheduling, and history retrieval, it should look up the patient by email or phone before performing the appointment operation. If the patient does not exist and the user wants to book, it asks for the patient's name and missing contact details, onboards the patient, and then continues booking with the returned patient ID.
+The agent follows a contact-first patient workflow. For booking, cancellation, rescheduling, and history retrieval, it looks up the patient by email or phone before performing the appointment operation. If the patient does not exist and the user wants to book, it asks for the patient's name and missing contact details, onboards the patient, and then continues booking with the returned patient ID.
 
-### `streamlit_chatbot.py`
+### `client/streamlit_chatbot.py`
 
-`streamlit_chatbot.py` provides a local Streamlit console for chat, patient management, history, and booking.
+`client/streamlit_chatbot.py` provides a local Streamlit console for chat, patient management, history, and booking.
 
 Responsibilities:
 
@@ -199,14 +266,14 @@ Responsibilities:
 
 Boundaries:
 
-- May call HTTP endpoints exposed by `api.py`.
-- Must not import `database.py`, `toolkit/tools.py`, or `appointment_agent.py`.
+- May call HTTP endpoints exposed by the FastAPI app in `main.py`.
+- Must not import `core/database.py`, `toolkit/tools.py`, or `agent/appointment_agent.py`.
 - Must not initialize or seed the database directly.
 
 Run the API with:
 
 ```bash
-uvicorn api:app --reload
+uvicorn main:app --reload
 ```
 
 ## Database Design
@@ -284,7 +351,7 @@ Design notes:
 POST /patients
         |
         v
-api.py validates name/contact
+controllers/patient_controller.py validates name/contact
         |
         v
 database.create_patient()
@@ -302,7 +369,7 @@ API returns created patient
 GET /patients/lookup?email=...&phone=...
         |
         v
-api.py receives query params
+controllers/patient_controller.py receives query params
         |
         v
 database.get_patient_by_contact()
@@ -317,7 +384,7 @@ API returns patient or 404
 POST /appointments/book
         |
         v
-api.py validates patient_id, doctor_name, date_slot
+controllers/appointment_chat_controller.py validates patient_id, doctor_name, date_slot
         |
         v
 database.create_appointment()
@@ -493,9 +560,10 @@ The API is intentionally thin. It validates input, calls service functions, and 
 This keeps business rules in one place:
 
 ```text
-api.py            HTTP boundary
-database.py       business logic and persistence
-toolkit/tools.py  chatbot adapters to business logic
+main.py                                  FastAPI app composition
+controllers/*.py                         HTTP route handlers
+database.py                              business logic and persistence
+toolkit/tools.py                         chatbot adapters to business logic
 ```
 
 This design prevents duplicate appointment behavior between the chatbot and API.
@@ -577,7 +645,7 @@ pip install -r requirements.txt
 Run the API:
 
 ```bash
-uvicorn api:app --reload
+uvicorn main:app --reload
 ```
 
 Open API docs:
@@ -589,34 +657,34 @@ http://127.0.0.1:8000/docs
 Run the Streamlit chatbot:
 
 ```bash
-streamlit run streamlit_chatbot.py
+streamlit run client/streamlit_chatbot.py
 ```
 
-### Option C: Run API and UI Together
+### Run API and UI Together
 
 Open two terminals from the `ClinicGenie-AI` folder.
 
 Terminal 1, API:
 
 ```bash
-uvicorn api:app --reload
+uvicorn main:app --reload
 ```
 
 Terminal 2, UI:
 
 ```bash
 $env:CLINICGENIE_API_BASE_URL="http://127.0.0.1:8000"
-streamlit run streamlit_chatbot.py
+streamlit run client/streamlit_chatbot.py
 ```
 
 The Streamlit app expects the FastAPI server at `http://127.0.0.1:8000` by default. Override it with:
 
 ```bash
 $env:CLINICGENIE_API_BASE_URL="http://127.0.0.1:8000"
-streamlit run streamlit_chatbot.py
+streamlit run client/streamlit_chatbot.py
 ```
 
-Doctor and specialization values are loaded from the appointment database through the API. Updating seeded appointment data changes the catalog without editing `tools.py`, `appointment_agent.py`, or `streamlit_chatbot.py`.
+Doctor and specialization values are loaded from the appointment database through the API. Updating seeded appointment data changes the catalog without editing `toolkit/tools.py`, `agent/appointment_agent.py`, or `client/streamlit_chatbot.py`.
 
 Observability endpoints:
 
@@ -648,10 +716,18 @@ curl -X POST http://127.0.0.1:8000/patients \
 curl "http://127.0.0.1:8000/patients/lookup?email=asha@example.com"
 ```
 
-### Check doctor availability
+### Check doctor availability by date range
 
 ```bash
-curl "http://127.0.0.1:8000/appointments/availability/doctor?date=05-08-2024&doctor_name=john%20doe"
+curl -X POST http://127.0.0.1:8000/doctors/search-available \
+  -H "Content-Type: application/json" \
+  -d "{\"start_date\":\"05-08-2024\",\"end_date\":\"10-08-2024\"}"
+```
+
+### Check specific doctor availability by date range
+
+```bash
+curl "http://127.0.0.1:8000/doctors/john%20doe/search-available?start_date=05-08-2024&end_date=10-08-2024"
 ```
 
 ### Book an appointment
