@@ -4,7 +4,7 @@ from typing import Optional
 from langchain_core.tools import tool
 
 from data_models.models import DateModel, DateTimeModel, IdentificationNumberModel
-from database import (
+from core.database import (
     cancel_appointment as cancel_patient_appointment,
     create_appointment,
     create_patient,
@@ -15,8 +15,10 @@ from database import (
     list_doctors,
     list_specializations,
     reschedule_appointment as reschedule_patient_appointment,
+    search_doctors_by_date_range as db_search_doctors_by_date_range,
+    search_doctor_availability_by_name_and_date_range as db_search_doctor_availability_by_name_and_date_range,
 )
-from observability import observe_operation
+from shared.observability import observe_operation
 
 
 def _to_am_pm(time_str: str) -> str:
@@ -284,3 +286,79 @@ def reschedule_appointment(
     if appointment is None:
         return "Not available slots in the desired period"
     return "Successfully rescheduled for the desired time"
+
+
+@tool
+@observe_operation(layer="tool", logger_name=__name__)
+def search_doctors_by_date_range(
+    start_date: DateModel,
+    end_date: DateModel,
+):
+    """
+    Search for all available doctors within a date range.
+    Use this to find which doctors are available between two dates.
+    The parameters should be dates in DD-MM-YYYY format mentioned by the user.
+    """
+    results = db_search_doctors_by_date_range(
+        start_date=start_date.date,
+        end_date=end_date.date,
+    )
+    
+    if len(results) == 0:
+        return f"No available doctors found between {start_date.date} and {end_date.date}."
+    
+    # Group by doctor
+    doctors_by_name: dict[str, dict] = {}
+    for appointment in results:
+        doctor = appointment["doctor_name"]
+        if doctor not in doctors_by_name:
+            doctors_by_name[doctor] = {
+                "specialization": appointment["specialization"],
+                "slots": []
+            }
+        doctors_by_name[doctor]["slots"].append(appointment["date_slot"])
+    
+    output = f"Available doctors between {start_date.date} and {end_date.date}:\n"
+    for doctor, info in sorted(doctors_by_name.items()):
+        output += f"\n{doctor} ({info['specialization']}):\n"
+        output += f"  Available slots: {', '.join(info['slots'][:5])}"
+        if len(info['slots']) > 5:
+            output += f" and {len(info['slots']) - 5} more..."
+        output += "\n"
+    
+    return output
+
+
+@tool
+@observe_operation(layer="tool", logger_name=__name__)
+def search_doctor_availability(
+    doctor_name: str,
+    start_date: DateModel,
+    end_date: DateModel,
+):
+    """
+    Search for a specific doctor's availability within a date range.
+    Use this to check if a particular doctor is available between two dates.
+    The parameters should be the doctor name and dates in DD-MM-YYYY format mentioned by the user.
+    """
+    matched_doctor = _match_catalog_value(doctor_name, list_doctors())
+    if matched_doctor is None:
+        return _unknown_doctor_message()
+    
+    results = db_search_doctor_availability_by_name_and_date_range(
+        doctor_name=matched_doctor,
+        start_date=start_date.date,
+        end_date=end_date.date,
+    )
+    
+    if len(results) == 0:
+        return f"No available slots for Dr. {matched_doctor} between {start_date.date} and {end_date.date}."
+    
+    output = f"Dr. {matched_doctor}'s availability between {start_date.date} and {end_date.date}:\n"
+    output += "Available slots: "
+    slots = [appointment["date_slot"] for appointment in results]
+    output += ", ".join(slots[:10])
+    if len(slots) > 10:
+        output += f" and {len(slots) - 10} more..."
+    
+    return output
