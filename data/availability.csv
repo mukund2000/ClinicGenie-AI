@@ -1,5 +1,5 @@
 date_slot,specialization,doctor_name,is_available,patient_to_attend
-05-08-2024 08:00,general_dentist,john doe,False,1234567.0
+05-08-2024 08:00,general_dentist,john doe,True,
 05-08-2024 08:30,general_dentist,john doe,False,1000082.0
 05-08-2024 09:00,general_dentist,john doe,False,1000048.0
 05-08-2024 09:30,general_dentist,john doe,False,1000036.0
