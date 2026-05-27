@@ -716,6 +716,27 @@ Chat requests use the longer timeout because the first call may initialize the L
 
 Doctor and specialization values are loaded from the appointment database through the API. Updating seeded appointment data changes the catalog without editing `toolkit/tools.py`, `agent/appointment_agent.py`, or `client/streamlit_chatbot.py`.
 
+### Deploy API on Render
+
+Render web services must bind to `0.0.0.0` and listen on the port from the `PORT` environment variable. This repo includes `start.py` for that.
+
+Use these Render settings:
+
+```text
+Build Command: pip install -r requirements.txt
+Start Command: python start.py
+```
+
+Set these environment variables in Render:
+
+```text
+GROQ_API_KEY=...
+TAVILY_API_KEY=...
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/neondb?sslmode=require
+```
+
+Render provides `PORT` automatically. Do not set `PORT` manually unless you have a specific reason.
+
 Observability endpoints:
 
 ```text
