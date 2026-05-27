@@ -2,10 +2,10 @@
 
 ## Overview
 
-ClinicGenie-AI is a doctor appointment system with two user-facing entry points:
+ClinicGenie-AI is a doctor appointment system with two deployed pieces:
 
-1. A FastAPI HTTP API for patient onboarding, lookup, appointment booking, cancellation, rescheduling, availability checks (single day or date range), history, and chat.
-2. A Streamlit chatbot UI that lets patients interact conversationally with the appointment agent.
+1. A FastAPI HTTP API deployed on Render for patient onboarding, lookup, appointment booking, cancellation, rescheduling, availability checks (single day or date range), history, and chat.
+2. A Streamlit Cloud chatbot UI at `https://clinicgenie-ai.streamlit.app/` that lets patients interact conversationally with the appointment agent through the Render API.
 
 Both paths use the same database-backed service layer in `core/database.py`. The app uses Neon/Postgres when `DATABASE_URL` is configured, and falls back to local SQLite when no Postgres URL is present. This keeps appointment state consistent whether a request comes from an API client or from the AI chatbot tools.
 
@@ -22,38 +22,37 @@ Both paths use the same database-backed service layer in `core/database.py`. The
 ## High-Level Architecture
 
 ```text
-Client / Browser / API Consumer
+Browser
         |
         v
-FastAPI app
-main.py
+Streamlit Cloud client
+https://clinicgenie-ai.streamlit.app/
         |
         v
-FastAPI controllers
-controllers/
+Render FastAPI API
+https://clinicgenie-ai.onrender.com
+        |
+        v
+FastAPI controllers + LangGraph agent/tools
         |
         v
 Database service layer
 core/database.py
         |
         v
-Neon/Postgres or local SQLite
+Neon Postgres
+```
 
 
+Local development can still run both apps:
+
+```text
 Streamlit chatbot
 client/streamlit_chatbot.py
         |
         v
-LangGraph appointment agent
-agent/appointment_agent.py
-        |
-        v
-LangChain tools
-toolkit/tools.py
-        |
-        v
-Database service layer
-core/database.py
+FastAPI app
+main.py
         |
         v
 Neon/Postgres or local SQLite
@@ -250,7 +249,7 @@ The agent follows a contact-first patient workflow. For booking, cancellation, r
 
 ### `client/streamlit_chatbot.py`
 
-`client/streamlit_chatbot.py` provides a local Streamlit console for chat, patient management, history, and booking.
+`client/streamlit_chatbot.py` provides the Streamlit client for chat, patient management, history, and booking. It runs on Streamlit Cloud in production and can also run locally.
 
 Responsibilities:
 
@@ -646,6 +645,8 @@ The service layer also has a lightweight guard, `ensure_database_initialized()`,
 
 ## Running the System
 
+### Local Development
+
 Install dependencies:
 
 ```bash
@@ -658,9 +659,10 @@ Configure environment variables in `.env`:
 GROQ_API_KEY=...
 TAVILY_API_KEY=...
 DATABASE_URL=postgresql://USER:PASSWORD@HOST/neondb?sslmode=require
+CLINICGENIE_API_BASE_URL=https://clinicgenie-ai.onrender.com
 ```
 
-`DATABASE_URL` is optional for local SQLite fallback, but required for Neon/Postgres. Keep `.env` out of version control because it contains credentials.
+`DATABASE_URL` is optional for local SQLite fallback, but required for Neon/Postgres. `CLINICGENIE_API_BASE_URL` points the Streamlit client at the deployed Render API by default. Keep `.env` out of version control because it contains credentials.
 
 Run the API:
 
@@ -674,7 +676,7 @@ Open API docs:
 http://127.0.0.1:8000/docs
 ```
 
-Run the Streamlit chatbot:
+Run the Streamlit chatbot locally:
 
 ```bash
 streamlit run client/streamlit_chatbot.py
@@ -697,7 +699,7 @@ $env:CLINICGENIE_API_BASE_URL="http://127.0.0.1:8000"
 streamlit run client/streamlit_chatbot.py
 ```
 
-The Streamlit app expects the FastAPI server at `http://127.0.0.1:8000` by default. Override it with:
+The Streamlit app uses the deployed Render API at `https://clinicgenie-ai.onrender.com` by default. Override it for local API development with:
 
 ```bash
 $env:CLINICGENIE_API_BASE_URL="http://127.0.0.1:8000"
@@ -718,6 +720,12 @@ Doctor and specialization values are loaded from the appointment database throug
 
 ### Deploy API on Render
 
+The FastAPI API is deployed at:
+
+```text
+https://clinicgenie-ai.onrender.com
+```
+
 Render web services must bind to `0.0.0.0` and listen on the port from the `PORT` environment variable. This repo includes `start.py` for that.
 
 Use these Render settings:
@@ -736,6 +744,30 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST/neondb?sslmode=require
 ```
 
 Render provides `PORT` automatically. Do not set `PORT` manually unless you have a specific reason.
+
+### Deploy Client on Streamlit Cloud
+
+The Streamlit client is deployed at:
+
+```text
+https://clinicgenie-ai.streamlit.app/
+```
+
+Use this app entry point in Streamlit Cloud:
+
+```text
+client/streamlit_chatbot.py
+```
+
+Set these secrets/environment variables in Streamlit Cloud:
+
+```text
+CLINICGENIE_API_BASE_URL=https://clinicgenie-ai.onrender.com
+CLINICGENIE_API_TIMEOUT_SECONDS=20
+CLINICGENIE_CHAT_TIMEOUT_SECONDS=120
+```
+
+The Streamlit client should not receive database credentials. It talks to the Render API over HTTP, and the Render API owns database access through Neon.
 
 Observability endpoints:
 
