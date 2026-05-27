@@ -1,12 +1,21 @@
 # Run this script to initialize the database and seed it with doctor availability data from the CSV file.
 
 import csv
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional, Sequence
 
+from dotenv import load_dotenv
 from shared.observability import observe_operation
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # pragma: no cover - handled at runtime when DATABASE_URL is set.
+    psycopg = None
+    dict_row = None
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -15,17 +24,71 @@ DATABASE_PATH = DATA_DIR / "clinicgenie.db"
 DOCTOR_AVAILABILITY_CSV = DATA_DIR / "doctor_availability.csv"
 _DATABASE_INITIALIZED = False
 
+load_dotenv(BASE_DIR / ".env")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
-def get_connection() -> sqlite3.Connection:
+
+class DatabaseConnection:
+    def __init__(self, connection: Any, use_postgres: bool) -> None:
+        self.connection = connection
+        self.use_postgres = use_postgres
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> Any:
+        return self.connection.execute(self._prepare_sql(sql), params)
+
+    def executemany(self, sql: str, params: Iterable[Sequence[Any]]) -> Any:
+        prepared_sql = self._prepare_sql(sql)
+        if self.use_postgres:
+            with self.connection.cursor() as cursor:
+                cursor.executemany(prepared_sql, params)
+                return cursor
+        return self.connection.executemany(prepared_sql, params)
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def _prepare_sql(self, sql: str) -> str:
+        if self.use_postgres:
+            return sql.replace("?", "%s")
+        return sql.replace("RETURNING id", "")
+
+    def last_insert_id(self, cursor: Any) -> int:
+        if self.use_postgres:
+            row = cursor.fetchone()
+            if row is None:
+                raise RuntimeError("Expected INSERT ... RETURNING id to return a row")
+            return int(row["id"])
+        return int(cursor.lastrowid)
+
+
+def get_connection() -> DatabaseConnection:
+    if USE_POSTGRES:
+        if psycopg is None or dict_row is None:
+            raise RuntimeError(
+                "DATABASE_URL is set, but psycopg is not installed. "
+                "Run: pip install -r requirements.txt"
+            )
+        return DatabaseConnection(
+            psycopg.connect(DATABASE_URL, row_factory=dict_row),
+            use_postgres=True,
+        )
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+    return DatabaseConnection(connection, use_postgres=False)
 
 
 @contextmanager
-def db_connection() -> Iterator[sqlite3.Connection]:
+def db_connection() -> Iterator[DatabaseConnection]:
     connection = get_connection()
     try:
         yield connection
@@ -40,47 +103,89 @@ def db_connection() -> Iterator[sqlite3.Connection]:
 @observe_operation(layer="db", logger_name=__name__)
 def initialize_database() -> None:
     global _DATABASE_INITIALIZED
-    if _DATABASE_INITIALIZED and DATABASE_PATH.exists():
+    if _DATABASE_INITIALIZED and (USE_POSTGRES or DATABASE_PATH.exists()):
         return
 
     with db_connection() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS patients (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE,
-                phone TEXT UNIQUE,
-                dob TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        if USE_POSTGRES:
+            _initialize_postgres_database(connection)
+        else:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS patients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    email TEXT UNIQUE,
+                    phone TEXT UNIQUE,
+                    dob TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
-            """
-        )
-        _ensure_appointments_schema(connection)
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS appointment_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id INTEGER NOT NULL,
-                appointment_id INTEGER,
-                action TEXT NOT NULL,
-                details TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (patient_id) REFERENCES patients(id),
-                FOREIGN KEY (appointment_id) REFERENCES appointments(id)
+            _ensure_appointments_schema(connection)
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS appointment_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_id INTEGER NOT NULL,
+                    appointment_id INTEGER,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (patient_id) REFERENCES patients(id),
+                    FOREIGN KEY (appointment_id) REFERENCES appointments(id)
+                )
+                """
             )
-            """
-        )
     _DATABASE_INITIALIZED = True
 
 
 @observe_operation(layer="db", logger_name=__name__)
 def ensure_database_initialized() -> None:
-    if not _DATABASE_INITIALIZED or not DATABASE_PATH.exists():
+    if not _DATABASE_INITIALIZED or (not USE_POSTGRES and not DATABASE_PATH.exists()):
         initialize_database()
 
 
-def _ensure_appointments_schema(connection: sqlite3.Connection) -> None:
+def _initialize_postgres_database(connection: DatabaseConnection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS patients (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE,
+            phone TEXT UNIQUE,
+            dob TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            date_slot TEXT NOT NULL,
+            specialization TEXT NOT NULL,
+            doctor_name TEXT NOT NULL,
+            is_available INTEGER NOT NULL DEFAULT 1,
+            patient_to_attend INTEGER REFERENCES patients(id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS appointment_history (
+            id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            patient_id INTEGER NOT NULL REFERENCES patients(id),
+            appointment_id INTEGER REFERENCES appointments(id),
+            action TEXT NOT NULL,
+            details TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def _ensure_appointments_schema(connection: DatabaseConnection) -> None:
     table = connection.execute(
         """
         SELECT name
@@ -171,13 +276,13 @@ def _ensure_appointments_schema(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE appointments_old")
 
 
-def _row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
+def _row_to_dict(row: Optional[Any]) -> Optional[dict[str, Any]]:
     if row is None:
         return None
     return dict(row)
 
 
-def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+def _rows_to_dicts(rows: list[Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
@@ -253,12 +358,14 @@ def create_patient(
             """
             INSERT INTO patients (name, email, phone, dob)
             VALUES (?, ?, ?, ?)
+            RETURNING id
             """,
             (name, email, phone, dob),
         )
+        patient_id = connection.last_insert_id(cursor)
         row = connection.execute(
             "SELECT * FROM patients WHERE id = ?",
-            (cursor.lastrowid,),
+            (patient_id,),
         ).fetchone()
     patient = _row_to_dict(row)
     if patient is None:
@@ -322,12 +429,12 @@ def record_patient_history(
 
 
 def _record_patient_history(
-    connection: sqlite3.Connection,
+    connection: DatabaseConnection,
     patient_id: int,
     action: str,
     appointment_id: Optional[int] = None,
     details: Optional[str] = None,
-) -> sqlite3.Row:
+) -> Any:
     cursor = connection.execute(
         """
         INSERT INTO appointment_history (
@@ -337,12 +444,14 @@ def _record_patient_history(
             details
         )
         VALUES (?, ?, ?, ?)
+        RETURNING id
         """,
         (patient_id, appointment_id, action, details),
     )
+    history_id = connection.last_insert_id(cursor)
     return connection.execute(
         "SELECT * FROM appointment_history WHERE id = ?",
-        (cursor.lastrowid,),
+        (history_id,),
     ).fetchone()
 
 
@@ -366,6 +475,7 @@ def create_appointment_slot(
                 patient_to_attend
             )
             VALUES (?, ?, ?, ?, ?)
+            RETURNING id
             """,
             (
                 date_slot,
@@ -375,9 +485,10 @@ def create_appointment_slot(
                 patient_to_attend,
             ),
         )
+        appointment_id = connection.last_insert_id(cursor)
         row = connection.execute(
             "SELECT * FROM appointments WHERE id = ?",
-            (cursor.lastrowid,),
+            (appointment_id,),
         ).fetchone()
     appointment = _row_to_dict(row)
     if appointment is None:
@@ -430,10 +541,14 @@ def list_doctors() -> list[str]:
     with db_connection() as connection:
         rows = connection.execute(
             """
-            SELECT DISTINCT doctor_name
-            FROM appointments
-            WHERE doctor_name IS NOT NULL
-              AND trim(doctor_name) != ''
+            SELECT doctor_name
+            FROM (
+                SELECT doctor_name
+                FROM appointments
+                WHERE doctor_name IS NOT NULL
+                  AND trim(doctor_name) != ''
+                GROUP BY doctor_name
+            ) AS doctor_catalog
             ORDER BY lower(doctor_name)
             """
         ).fetchall()
@@ -446,10 +561,14 @@ def list_specializations() -> list[str]:
     with db_connection() as connection:
         rows = connection.execute(
             """
-            SELECT DISTINCT specialization
-            FROM appointments
-            WHERE specialization IS NOT NULL
-              AND trim(specialization) != ''
+            SELECT specialization
+            FROM (
+                SELECT specialization
+                FROM appointments
+                WHERE specialization IS NOT NULL
+                  AND trim(specialization) != ''
+                GROUP BY specialization
+            ) AS specialization_catalog
             ORDER BY lower(specialization)
             """
         ).fetchall()
@@ -688,10 +807,7 @@ def seed_appointments_from_csv(csv_path: Path = DOCTOR_AVAILABILITY_CSV) -> int:
         }
         for patient_id in patient_ids:
             connection.execute(
-                """
-                INSERT OR IGNORE INTO patients (id, name)
-                VALUES (?, ?)
-                """,
+                _insert_patient_if_missing_sql(),
                 (patient_id, f"Imported Patient {patient_id}"),
             )
         connection.executemany(
@@ -707,8 +823,36 @@ def seed_appointments_from_csv(csv_path: Path = DOCTOR_AVAILABILITY_CSV) -> int:
             """,
             appointments,
         )
+        if USE_POSTGRES:
+            _sync_postgres_identity_sequences(connection)
 
     return len(appointments)
+
+
+def _sync_postgres_identity_sequences(connection: DatabaseConnection) -> None:
+    for table_name in ("patients", "appointments", "appointment_history"):
+        connection.execute(
+            f"""
+            SELECT setval(
+                pg_get_serial_sequence('{table_name}', 'id'),
+                COALESCE((SELECT MAX(id) FROM {table_name}), 1),
+                (SELECT MAX(id) FROM {table_name}) IS NOT NULL
+            )
+            """
+        )
+
+
+def _insert_patient_if_missing_sql() -> str:
+    if USE_POSTGRES:
+        return """
+            INSERT INTO patients (id, name)
+            VALUES (?, ?)
+            ON CONFLICT (id) DO NOTHING
+        """
+    return """
+        INSERT OR IGNORE INTO patients (id, name)
+        VALUES (?, ?)
+    """
 
 
 @observe_operation(layer="db", logger_name=__name__)
@@ -730,8 +874,9 @@ def check_database_health() -> dict[str, Any]:
         ).fetchone()
     return {
         "status": "ok",
-        "database_path": str(DATABASE_PATH),
-        "database_exists": DATABASE_PATH.exists(),
+        "database": "postgres" if USE_POSTGRES else "sqlite",
+        "database_path": None if USE_POSTGRES else str(DATABASE_PATH),
+        "database_exists": True if USE_POSTGRES else DATABASE_PATH.exists(),
         "patients": int(patient_count["total"]),
         "appointments": int(appointment_count["total"]),
     }

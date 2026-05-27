@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -9,6 +10,8 @@ import streamlit as st
 
 
 API_BASE_URL = os.getenv("CLINICGENIE_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+API_TIMEOUT_SECONDS = int(os.getenv("CLINICGENIE_API_TIMEOUT_SECONDS", "20"))
+CHAT_TIMEOUT_SECONDS = int(os.getenv("CLINICGENIE_CHAT_TIMEOUT_SECONDS", "120"))
 
 
 st.set_page_config(page_title="ClinicGenie", page_icon="CG", layout="wide")
@@ -52,6 +55,7 @@ def api_request(
     path: str,
     payload: Optional[dict[str, Any]] = None,
     params: Optional[dict[str, Any]] = None,
+    timeout: int = API_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     query = ""
     if params:
@@ -73,7 +77,7 @@ def api_request(
     )
 
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=timeout) as response:
             data = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.reason
@@ -87,6 +91,11 @@ def api_request(
     except URLError as exc:
         raise ApiClientError(
             f"Could not reach ClinicGenie API at {API_BASE_URL}. Start it with `uvicorn main:app --reload`."
+        ) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise ApiClientError(
+            f"ClinicGenie API did not respond within {timeout} seconds. "
+            "The request may still be running; try again in a moment."
         ) from exc
 
     if not data:
@@ -134,7 +143,7 @@ if "availability_context" not in st.session_state:
     st.session_state.availability_context = None
 
 st.title("ClinicGenie Appointment Console")
-st.caption("Chat with the assistant, manage patients, and book appointments from one SQLite-backed workspace.")
+st.caption("Chat with the assistant, manage patients, and book appointments from one database-backed workspace.")
 
 with st.sidebar:
     st.subheader("API")
@@ -199,6 +208,7 @@ with tab_chat:
                             "message": user_input,
                             "history": st.session_state.messages[:-1],
                         },
+                        timeout=CHAT_TIMEOUT_SECONDS,
                     )
                     assistant_response = chat_response["response"]
                 except ApiClientError as exc:
